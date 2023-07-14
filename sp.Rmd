@@ -1,0 +1,763 @@
+---
+title: "Sp"
+author: "Drashti(dpanc3)"
+date: "2023-05-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+# Intro
+
+> This dataset is used to predict whether a patient is likely to get stroke based on the input parameters like gender, age, various diseases, and smoking status.
+> Each row in the data provides relevant information about the patient.
+
+# Libraries
+                                                                                        
+
+To see the libraries I am using here, press **Code** button to the right.                                                                                                  
+                                                                                                  
+```{r, message=FALSE, warning=FALSE}
+library(tidymodels) # models
+library(skimr) # descriptive stats
+library(stringr) # works with strings
+library(themis) # for SMOTE and other recipes for target balancing
+library(vip) # for variable importance
+library(probably) # for performance calibration
+ 
+```
+
+# Data set
+
+```{r, message=FALSE, warning=FALSE}
+# upon quick look at the data set
+# if you set smoking_status to factor in col_types, na() won't work
+# remove ID, Sex == Other
+# output to a factor
+df <- 
+  readr::read_csv("../input/stroke-prediction-dataset/healthcare-dataset-stroke-data.csv", col_types = "cfdfffffddcf", na = c("Unknown", "N/A")) %>% 
+  mutate(smoking_status = factor(smoking_status),
+         stroke = factor(ifelse(stroke == 1, "yes", "no"), levels = c("yes", "no"))) %>% 
+  select(-id)
+
+df
+```
+
+In `smoking_status` 'Unknown' should be changed to NA.
+
+Also, it can be ordered: never < formerly < smokes
+
+`ever_married` can be re-coded as 0/1 in accordance with `heart_disease` and `hypertension`
+
+`id` can be removed
+
+Other columns seem to be OK
+
+## Descriptive statistics
+
+```{r, message=FALSE, warning=FALSE}
+skim(df) %>%
+  yank("factor")
+```
+
+- Target 'stroke' is hugely imbalanced!
+
+- 'smoking_status' completeness rate is low
+
+ - One 'Other' gender can be removed
+
+```{r, message=FALSE, warning=FALSE}
+df <- df %>% filter(gender != "Other")
+
+skim(df) %>%
+  yank("numeric")
+```
+
+- BMI completeness rate 0.96
+
+### How many `smoking_status` in each target class?
+
+Keep in mind that if smoking NAs are mainly in "healthy" class, we can simply remove them
+
+```{r, message=FALSE, warning=FALSE}
+df %>% group_by(stroke, smoking_status) %>% 
+  count()
+```
+
+A lot of them are in "stroke" group, some imputation will be needed.
+
+### How many skipped BMI values in each target class?
+
+```{r, message=FALSE, warning=FALSE}
+df %>% filter(is.na(bmi)) %>% 
+  group_by(stroke) %>% 
+  count()
+```
+
+- We have too many NAs in BMI among 'stroke-yes' cases to simply remove them. Some imputation is needed.
+
+# Exploratory Data Analysis
+
+## Quick overview
+
+```{r pairs, fig.width=10, fig.height=10, warning=FALSE, message=FALSE}
+GGally::ggpairs(df, aes(color = stroke, alpha = 0.2, dotsize = 0.02), 
+        upper = list(continuous = GGally::wrap("cor", size = 2.5)),
+        diag = list(continuous = "barDiag")) +
+  scale_color_brewer(palette = "Set1", direction = -1) +
+  scale_fill_brewer(palette = "Set1", direction = -1)
+```
+
+## In details
+
+### Stroke vs Age
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(df, aes(stroke, age)) +
+  geom_boxplot(aes(fill = stroke), alpha = 0.5, varwidth = T, notch = T) +
+  geom_violin(aes(fill = stroke), alpha = 0.5) +
+  scale_fill_brewer(palette = "Set1", direction = -1) +
+  xlab("")
+```
+
+- No surprises here: the older you get the higher the chance of getting stroke.
+
+- There are observation with age much below 20 y.o., even close to 0! 
+These are very young kids or babies - should we even include them in the analysis?
+If yes, the rest will be prediction only for adults. 
+
+- Stroke in kids probably has very different causes compared to stroke in adults/older folk.
+
+### Stroke vs Age + Gender
+
+```{r box1, message=FALSE, warning=FALSE}
+ggplot(df, aes(stroke, age)) + 
+  geom_violin(alpha=0.3) +
+  geom_jitter(alpha=0.2, size=0.8, width = 0.15, height = 0.1, aes(color = gender)) + 
+  geom_boxplot(alpha = 0.2) +
+  scale_color_brewer(palette = "Set2", direction = -1)
+```
+
+- No gender imbalance with respect to `age` and `stroke`
+
+### Stroke vs Glucose
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(df, aes(stroke, avg_glucose_level)) +
+  geom_boxplot(aes(fill = stroke), alpha = 0.5, varwidth = T, notch = T) +
+  geom_violin(aes(fill = stroke), alpha = 0.5) +
+  scale_fill_brewer(palette = "Set1", direction = -1) +
+  xlab("") +
+  ylab("avg glucose level")
+```
+
+- Observations with stroke tend to have higher glucose level
+
+This average glucose level is probably the results of fasting blood sugar test
+
+If I correctly understand this [CDC information](https://www.cdc.gov/diabetes/basics/getting-tested.html#:~:text=Fasting%20Blood%20Sugar%20Test&text=A%20fasting%20blood%20sugar%20level,higher%20indicates%20you%20have%20diabetes.) on diabetes, values greater than 126 is evidence of diabetes.  But >250? Is it realistic?
+
+### Stroke vs BMI
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(df, aes(stroke, bmi)) +
+  geom_boxplot(aes(fill = stroke), alpha = 0.5, varwidth = T, notch = T) +
+  geom_violin(aes(fill = stroke), alpha = 0.5) +
+  scale_fill_brewer(palette = "Set1", direction = -1) +
+  xlab("")
+```
+
+- BMI over 40 is the 3rd class of obesity - BMI over 75 should not exist at all, I think.
+
+Let's look' at this weird points
+
+### Age vs BMI
+
+```{r, message=FALSE, warning=FALSE}
+facet_names <- c("no" = "no stroke", "yes" = "stroke")
+
+ggplot(df, aes(age, bmi)) +
+  geom_point(color = "steelblue", alpha = 0.8, size = 0.5) +
+  facet_grid(rows = vars(stroke), labeller = as_labeller(facet_names)) +
+  guides()
+```
+
+Patients with BMI over 75 are also very young. Suspicious.
+
+### Glucose vs Age + smoking
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(df, aes(age, avg_glucose_level)) +
+  geom_point(aes(color = smoking_status), alpha = 0.6, size = 1) +
+  scale_fill_brewer(palette = "Set1", direction = -1) +
+  facet_grid(rows = vars(stroke), labeller = as_labeller(facet_names)) +
+  guides()
+```
+
+- Children are mainly of 'Unknown' smoking status; both target groups are divided into two clusters -- I am curious why.
+It is not gender, nor heart disease or any other factor we have in the data set.
+
+### Age vs Smoking
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(df, aes(smoking_status, age)) +
+  geom_boxplot(aes(fill = stroke), alpha = 0.5, varwidth = T, notch = T) +
+  scale_fill_brewer(palette = "Set1", direction = -1) +
+  xlab("")
+```
+
+- Kids are main non-smokers of course. Note the same two outliers of age below 20 in 'stroke-yes'
+
+### Glucose vs BMI
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(df, aes(avg_glucose_level, bmi)) +
+  geom_point(aes(color = age), alpha = 0.6, size = 1) +
+  scale_fill_brewer(palette = "Set1", direction = -1) +
+  facet_grid(rows = vars(stroke), labeller = as_labeller(facet_names)) +
+  guides() +
+  xlab("avg glucose level")
+```
+
+- BMI outliers: super high BMI but super low glucose levels? How is that possible?
+
+- Can it be a bias introduced by testing protocol misuse? Like instead of measuring glucose *before* eating, in some samples it was done *after* eating?
+
+- Again, all the observations in both target classes form two distinct clusters.
+
+### Stroke vs Gender
+
+```{r bar1, message=FALSE, warning=FALSE}
+gender <- df %>% group_by(stroke, gender) %>% summarize(N=n())
+
+ggplot(gender, aes(stroke, N)) +
+  geom_bar(aes(fill=gender), alpha = 0.8, stat = "identity", position = "fill") +
+  scale_fill_brewer(palette = "Set2", direction = -1) +
+  ylab("proportion")
+```
+
+- No disproportions here
+
+### Stroke vs Hypertension
+
+```{r bar2, message=FALSE, warning=FALSE}
+hyptens <- df %>% group_by(stroke, hypertension) %>% summarize(N = n())
+
+ggplot(hyptens, aes(stroke, N)) +
+  geom_bar(aes(fill = hypertension), alpha = 0.8, stat = "identity", position = "fill") +
+  scale_fill_brewer(palette = "Set2", direction = -1) +
+  ylab("proportion")
+```
+
+- Hypertension occurred more often in `stroke-yes`
+
+### Stroke vs Heart Disease
+
+```{r, message=FALSE, warning=FALSE}
+heart <- df %>% group_by(stroke, heart_disease) %>% summarize(N=n())
+
+ggplot(heart, aes(stroke, N)) +
+  geom_bar(aes(fill = heart_disease), alpha = 0.8, stat = "identity", position = "fill") +
+  scale_fill_brewer(palette = "Set2", direction = 1) +
+  ylab("proportion")
+```
+
+- Heart disease occurred more often in `stroke-yes`
+
+### Stroke vs Ever Married
+
+```{r, message=FALSE, warning=FALSE}
+married <- df %>% group_by(stroke, ever_married) %>% summarize(N=n())
+
+ggplot(married, aes(stroke, N)) +
+  geom_bar(aes(fill = ever_married), alpha = 0.8, stat = "identity", position = "fill") +
+  scale_fill_brewer(palette = "Set2", direction = -1) +
+  ylab("proportion")
+```
+
+- Marriage is bad :)
+
+### Stroke vs Work Type
+
+```{r, message=FALSE, warning=FALSE}
+work <- df %>% group_by(stroke, work_type) %>% summarize(N=n())
+
+ggplot(work, aes(stroke, N)) +
+  geom_bar(aes(fill = work_type), alpha = 0.8, stat = "identity", position = "fill") +
+  scale_fill_brewer(palette = "Set2", direction = 1) +
+  ylab("proportion")
+```
+
+- It is good to be a child :)
+
+- It is bad to be self-employed :)
+
+### Stroke vs Residence Type
+
+```{r, message=FALSE, warning=FALSE}
+residence <- df %>% group_by(stroke, Residence_type) %>% summarize(N=n())
+
+ggplot(residence, aes(stroke, N)) +
+  geom_bar(aes(fill = Residence_type), alpha = 0.8, stat = "identity", position = "fill") +
+  scale_fill_brewer(palette = "Set2", direction = 1) +
+  ylab("proportion")
+```
+
+- No disproportions here
+
+### Stroke vs Smoking
+
+```{r, message=FALSE, warning=FALSE}
+smoking <- df %>% group_by(stroke, smoking_status) %>% summarize(N=n())
+
+ggplot(smoking, aes(stroke, N)) +
+  geom_bar(aes(fill = smoking_status), alpha = 0.8, stat = "identity", position = "fill") +
+  scale_fill_brewer(palette = "Set2", direction = 1) +
+  ylab("proportion")
+```
+
+- There are more smokers of all types in `stroke-yes` 
+
+### Kids and Smoking
+
+```{r, message=FALSE, warning=FALSE}
+df %>% filter(work_type == "children") %>% 
+  group_by(smoking_status) %>% 
+  summarise(N = n(), 
+            avg.age = mean(age), 
+            max.age = max(age), 
+            min.age = min(age))
+```
+
+A lot of NAs in `smoking_status` comes from group 'Children' (see `work_type`). I can replace them with 'never smoked' during imputation stage of the analysis.
+
+### Conclusions
+
+There are several suspicious outliers (like in BMI and glucose). I can safely remove BMI > 75, maybe even BMI > 60 (Remember that  BMI > 40 is the highest class of obesity).
+
+What is less safe - it is removing non-adults (younger than 20 y.o.). On one hand they provide valid information (age is very important predictor), on the other hand their stroke cases are really sus and a lot of predictors do not have sense (or are obvious NAs) for non-adults (like smoking, marriage status, employment type, residence type etc.); model-based imputation of `smoking_status` in children does not have sense as well, I should rather replace with "never smoked".
+
+Since, modelling using all predictors and observations has given me very moderate results (TPR = 1 comes with very high FPR and very low probability cutoff close to 0), I will try various trimming of the data.
+
+# Data preprocessing
+
+## Stratified split
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(124)
+
+data_split <- initial_split(df, prop = 3/4, strata = stroke)
+
+df_train <- training(data_split)
+df_test <- testing(data_split)
+```
+
+## 10-fold CV repeated 10 times
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(345)
+# Stratified, repeated 10-fold cross-validation
+cv_folds <- vfold_cv(df_train, strata = "stroke", v = 10, repeats = 10)
+
+# metrics
+cls_metrics <- metric_set(roc_auc, j_index)
+```
+
+
+## Recipe
+
+```{r, message=FALSE, warning=FALSE}
+prep_recipe <- recipe(stroke ~ ., data = df_train) %>%
+  step_impute_bag(bmi, smoking_status) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors()) %>% 
+  #step_impute_bag(all_predictors()) %>% 
+  step_normalize(age, avg_glucose_level, bmi) %>% 
+  step_smote(stroke, over_ratio = 1, seed = 100) %>%
+  check_missing(all_predictors()) %>% 
+  step_zv(all_predictors())
+
+prep_recipe
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE, eval=FALSE}
+# the other way is to apply the recipe to your data immediately
+# prep & bake
+train_data <- prep_recipe %>% 
+  prep(training = df_train) %>% 
+  bake(new_data = NULL) # df_train will be processed
+
+# bake test. what about SMOTE?
+test_data <- prep_recipe %>% 
+  prep(training = df_test) %>% 
+  bake(new_data = df_test)
+
+# check oversampling results
+train_data %>% count(stroke) # SMOTE was applied
+test_data %>% count(stroke) # not applied
+```
+
+# Penalized Logistic Regression
+
+I add one more step to the recipe - remove correlated predictors (threshold = 0.75)
+
+```{r, message=FALSE, warning=FALSE}
+# recipe for LR
+lr_recipe <- prep_recipe %>% 
+  step_corr(all_predictors(), threshold = 0.75)
+
+# set model type/engine
+lr_mod <- logistic_reg(penalty = tune(), mixture = 1) %>% 
+  set_engine("glmnet")
+
+# define the workflow
+lr_workflow <- 
+  workflow() %>% 
+  add_model(lr_mod) %>% 
+  add_recipe(lr_recipe)
+
+# create a tune grid
+lr_reg_grid <- tibble(penalty = 10**seq(-4, 0, length.out = 30))
+
+# train and tune the model
+lr_res <- tune_grid(lr_workflow,
+              grid = lr_reg_grid,
+              resamples = cv_folds,
+              control = control_grid(save_pred = TRUE),
+              metrics = cls_metrics)
+
+autoplot(lr_res)
+```
+
+> The lower the penalty, the smaller the number of predictors used by the model. Such models should be preferred.
+
+## Choose the best model
+
+Here you see top 5 best models based on mean AUC and ranked by penalty score
+
+```{r, message=FALSE, warning=FALSE}
+top_models <-
+  lr_res %>% 
+  show_best("roc_auc", n = 5) %>% 
+  arrange(penalty) 
+
+top_models %>% arrange(penalty)
+```
+
+I will choose a model with the highest mean AUC
+
+```{r, message=FALSE, warning=FALSE}
+lr_best <- lr_res %>% 
+  select_best(metric = "roc_auc")
+
+lr_best
+```
+
+## ROC-AUC of the best model
+
+```{r, message=FALSE, warning=FALSE}
+lr_auc <- 
+  lr_res %>% 
+  collect_predictions(parameters = lr_best) %>% 
+  roc_curve(stroke, .pred_yes) %>% 
+  mutate(model = "Logistic Regression")
+
+autoplot(lr_auc)
+
+```
+
+
+
+# Random Forest
+
+## Tuning
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(5732)
+
+# number of cores available on Kaggle
+cores <- 4L 
+
+# model specification
+rf_mod <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_engine("ranger", num.threads = cores) %>% 
+  set_mode("classification")
+
+# workflow
+rf_cv_wf <- workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(prep_recipe)
+
+# tune models
+rf_res <- tune_grid(rf_cv_wf,
+            grid = 25,
+            resamples = cv_folds,
+            control = control_grid(save_pred = TRUE),
+            metrics = cls_metrics)
+
+autoplot(rf_res)
+```
+
+
+Models with lower `mtry` should be preferred.
+
+## Choose the best model
+
+5 best models ranked by mean AUC
+
+```{r, message=FALSE, warning=FALSE}
+rf_res %>% 
+  show_best(metric = "roc_auc")
+```
+
+5 best models ranked by J-index
+
+```{r, message=FALSE, warning=FALSE}
+rf_res %>% 
+  show_best(metric = "j_index")
+```
+
+The best hyper-parameters look like this:
+
+```{r, message=FALSE, warning=FALSE}
+rf_best <- rf_res %>% 
+  select_best(metric = "roc_auc")
+
+rf_best
+```
+
+## ROC-AUC of the best model
+
+```{r, message=FALSE, warning=FALSE}
+rf_auc <- rf_res %>% 
+  collect_predictions(parameters = rf_best) %>% 
+  roc_curve(stroke, .pred_yes) %>% 
+  mutate(model = "Random Forest")
+
+autoplot(rf_auc) # 0.8
+```
+
+
+# Boosted trees
+
+## Tune
+
+Using the same basic recipe as for Random Forest
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(732)
+
+# number of cores available on Kaggle
+cores <- 4L 
+
+# model specification
+xgb_mod <- 
+  boost_tree(
+    trees = 50, 
+    mtry = tune(), 
+    min_n = tune(), 
+    tree_depth = tune(), 
+    learn_rate = tune(), 
+    loss_reduction = tune(), 
+    sample_size = tune(), 
+    stop_iter = tune()) %>% 
+  set_engine("xgboost", num.threads = cores) %>% 
+  set_mode("classification")
+
+# workflow
+xgb_cv_wf <- workflow() %>% 
+  add_model(xgb_mod) %>% 
+  add_recipe(prep_recipe)
+
+# tune models, this takes time
+xgb_res <- tune_grid(xgb_cv_wf,
+            grid = 25,
+            resamples = cv_folds,
+            control = control_grid(save_pred = TRUE),
+            metrics = cls_metrics)
+```
+
+## Tuning results
+
+```{r, fig.width=7, message=FALSE, warning=FALSE}
+autoplot(xgb_res)
+```
+
+## Choose the best model
+
+5 best models ranked by mean AUC
+
+```{r, message=FALSE, warning=FALSE}
+xgb_res %>% 
+  show_best(metric = "roc_auc")
+```
+
+5 best models ranked by mean J-index
+
+```{r, message=FALSE, warning=FALSE}
+xgb_res %>% 
+  show_best(metric = "j_index")
+```
+
+The best hyper-parameters look like this:
+
+```{r, message=FALSE, warning=FALSE}
+xgb_best <- xgb_res %>% 
+  select_best(metric = "roc_auc")
+
+xgb_best
+```
+
+## ROC-AUC of the best model
+
+```{r, message=FALSE, warning=FALSE}
+xgb_auc <- xgb_res %>% 
+  collect_predictions(parameters = xgb_best) %>% 
+  roc_curve(stroke, .pred_yes) %>% 
+  mutate(model = "Boosted Trees")
+
+autoplot(xgb_auc)
+```
+
+# Compare Logistic Regression, Random Forest and Boosted Trees models
+
+```{r, message=FALSE, warning=FALSE}
+bind_rows(rf_auc, lr_auc, xgb_auc) %>% 
+  ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 0.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)
+
+```
+
+Based on shape of ROC curve and AUC, I can conclude that  LR performs slightly better than BT and RF. 
+
+I will use LR for the final fit and check its performance on the testing data set.
+
+# The final fit
+
+Fit the penalized Logistic Regression model with chosen hyper-parameters to the entire training data set and test it on the test data set.
+
+```{r, message=FALSE, warning=FALSE}
+# the last model
+last_mod <- logistic_reg(penalty = lr_best$penalty, mixture = 1) %>% 
+  set_engine("glmnet")  %>% 
+  set_mode("classification")
+
+# the last workflow: based on LR
+last_wf <- 
+  lr_workflow %>% 
+  update_model(last_mod)
+
+# the last fit
+set.seed(345)
+last_fit <- 
+  last_wf %>% 
+  last_fit(data_split)
+```
+
+## Accuracy and AUC of the final fit
+
+```{r, message=FALSE, warning=FALSE}
+last_fit %>% 
+  collect_metrics()
+```
+
+## Variable importance
+
+```{r, message=FALSE, warning=FALSE}
+last_fit %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 15)
+```
+
+
+## ROC curve on the test data set
+
+```{r, message=FALSE, warning=FALSE}
+last_fit %>% 
+  collect_predictions() %>% 
+  roc_curve(stroke, .pred_yes) %>% 
+  autoplot()
+
+```
+
+
+## Balancing performance by choosing optimal probability cut-off.
+
+I will use j-index (as explained [here](https://probably.tidymodels.org/articles/where-to-use.html)) to balance performance of the model.
+
+> j-index has a maximum value of 1 when there are no false positives and no false negatives. It can be used as justification of whether or not an increase in the threshold value is worth it. If increasing the threshold results in more of an increase in the specificity than a decrease in the sensitivity, we can see that with j-index.
+
+```{r, message=FALSE, warning=FALSE}
+# collect sens, spec, j-index at various cut-offs
+threshold_data <- 
+  last_fit %>%
+  collect_predictions() %>%
+  threshold_perf(stroke, .pred_yes, thresholds = seq(0.0, 1, by = 0.05)) %>% 
+  filter(.metric != "distance") %>%
+  mutate(group = case_when(
+    .metric == "sens" | .metric == "spec" ~ "1",
+    TRUE ~ "2"
+  ))
+
+# find max j-index
+max_j_index_threshold <- threshold_data %>%
+  filter(.metric == "j_index") %>%
+  filter(.estimate == max(.estimate)) %>%
+  pull(.threshold)
+
+# plot metrics v cut-offs
+ggplot(threshold_data, aes(x = .threshold, y = .estimate, color = .metric, alpha = group)) +
+  geom_line(size=1) +
+  #theme_minimal() +
+  #scale_color_viridis_d(end = 0.9) +
+  scale_color_brewer(palette = "Set1") +
+  scale_alpha_manual(values = c(.4, 1), guide = "none") +
+  geom_vline(xintercept = max_j_index_threshold, alpha = .8, color = "grey30", linetype = "longdash") +
+  labs(
+    x = "Probability",
+    y = "Metric Estimate",
+    title = "Optimal probability cut-off"
+  )
+```
+
+j-index is at its maximum at probability cut-off `r max_j_index_threshold`. This value can be chosen to calculate the final confusion matrix.
+
+## Confusion Matrix
+
+```{r, message=FALSE, warning=FALSE}
+pred_optimized <- last_fit %>%
+  collect_predictions() %>% 
+  mutate(
+    .pred = make_two_class_pred(
+      estimate = .pred_yes, 
+      levels = levels(stroke), 
+      threshold = max_j_index_threshold
+    )
+  ) %>%
+  select(stroke, contains(".pred"))
+
+cm_optimized <- pred_optimized %>% 
+  conf_mat(truth = stroke, estimate = .pred)
+
+autoplot(cm_optimized, type = "heatmap")
+```
+
+## All performance metrics
+
+With probability cut-off `r max_j_index_threshold`
+
+```{r, message=FALSE, warning=FALSE}
+summary(cm_optimized)
+```
+
+The performance of this model is far from perfect, although it is significantly better than in previous iterations of this notebook.
+
+My guess is that life style is a poor predictor of stroke. In order to get better performing models, we need more data related to physiology, biochemistry or genetics of patients.
