@@ -1,9 +1,3 @@
----
-title: "Final Project ML"
-author: "Rohit kaushik"
-date: "2023-05-05"
-output: html_document
----
 
 ```{r}
 #rm(list=ls())  # clear the environment
