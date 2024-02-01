@@ -12,8 +12,7 @@ The dataset normally contains details about a person's age, ID, gender, smoking 
 The main objective of this study is to conduct a thorough investigation and correctly identify the variable that, in dependence on the input parameters provided in the Stroke Prediction Dataset, has the largest impact and influence on patients who are likely to experience a stroke.
 
 ### Goals of Project :
-The goal of this  Stroke Prediction is to determine which conditions, lifestyle or habit such as smoking, heart disease, hypertension and How does level consumption of glucose impact on stroke risk.
-![image](https://github.com/drashtip7/Stroke-Prediction/assets/74112283/cc318816-01e0-470f-9ff6-d3957068c627)
+The goal of this  Stroke Prediction is to determine which conditions, lifestyle or habit such as smoking, heart disease, hypertension and How does level consumption of glucose impact on stroke risk
 
 ### Conclusion
 So in this mini-project, we saw some of the factors that might result in strokes. Where Age was highly correlated followed by hypertension, heart disease, avg glucose level, and ever married.
