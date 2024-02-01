@@ -1,8 +1,5 @@
 # Stroke-Prediction
-
 ### Abstract 
-
-
 Analysis on Stroke Prediction Dataset involves exploring and analyzing the various factors that may contribute to the likelihood of a person experiencing a stroke.
 The dataset normally contains details about a person's age, ID, gender, smoking status, hypertension, heart disease, marital status, kind of job or place of residence, average blood sugar level, BMI, and status for strokes, among other things. Researchers can find correlations and patterns in data through data analysis that may help in forecasting the risk of stroke. To acquire a deeper knowledge of each piece of data and how they relate to one another, this analysis involved exploratory data and analysis (EDA) utilizing R and RStudio. To further help illustrate the patterns and trends in the data, data visualization tools like charts, graphs, scatter plots, and heat maps may be employed.  This Stroke prediction dataset data analysis is a useful tool for understanding the risk factors.
 ![image](https://github.com/drashtip7/Stroke-Prediction/assets/74112283/3df931c4-67f2-48bf-9384-0f02c17a24a4)
