@@ -15,7 +15,6 @@ The main objective of this study is to conduct a thorough investigation and corr
 The goal of this  Stroke Prediction is to determine which conditions, lifestyle or habit such as smoking, heart disease, hypertension and How does level consumption of glucose impact on stroke risk.
 ![image](https://github.com/drashtip7/Stroke-Prediction/assets/74112283/cc318816-01e0-470f-9ff6-d3957068c627)
 
-
 ### Conclusion
 So in this mini-project, we saw some of the factors that might result in strokes. Where Age was highly correlated followed by hypertension, heart disease, avg glucose level, and ever married.
 XGBClassifier was a knight who performed well. There are outliers in some variable, reason behind why I kept it as it is because these things are either depends on other factors and there are possibilities of having such kind of records. For example, BMI can be high and still no stroke as a person is young or he does not have any heart disease. If you have any doubt or suggestion please comment it down. I would love to learn new things.
